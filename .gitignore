@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+backend/weights/*.pth
+
+# Images & Data
+*.jpg
+*.png
+*.jpeg
+!frontend/assets/*.png
+!frontend/assets/*.jpg
+
+# Environment
+.venv/
+env/
+venv/
+ENV/
+
+# System Files
+.DS_Store
+Thumbs.db
