@@ -298,8 +298,8 @@ def grid_sample(x, offset, scale, outH=None, outW=None):
     ## sampling
     ## Remember to add "align_corners=True" to F.grid_sample() if you are using pytorch>=1.3.0
     # if is_pytorch_version_higher_than(target_version="1.3.0"):
-    #     output = F.grid_sample(x, grid, padding_mode='zeros', align_corners=True)
-    # else:
     output = F.grid_sample(x, grid, padding_mode='zeros', align_corners=True)
+    # else:
+    # output = F.grid_sample(x, grid, padding_mode='zeros', align_corners=True)
 
     return output

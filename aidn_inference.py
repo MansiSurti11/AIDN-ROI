@@ -43,6 +43,8 @@ class AIDNWrapper:
         else:
             self.embed_net = None
             self.restore_net = None
+            
+        self.quantizer = getattr(self.model, 'quantizer', None)
 
     def _pad_to_multiple(self, img: Image.Image, multiple: int = 12):
         w, h = img.size
@@ -62,6 +64,8 @@ class AIDNWrapper:
 
         with torch.no_grad():
             lr_t = self.embed_net(x, scale_t)
+            if self.quantizer is not None:
+                lr_t = self.quantizer(lr_t)
 
         lr_t = lr_t.clamp(0, 1)
         lr_img = TF.to_pil_image(lr_t.squeeze(0).cpu())
@@ -107,3 +111,52 @@ class AIDNWrapper:
         hr_patch = hr_patch.crop((0, 0, hr_w, hr_h))
 
         return hr_patch
+
+    def restore_full_image(
+        self,
+        lr_image: Image.Image,
+        scale: float,
+        patch_size: int = 128,
+        overlap: int = 16
+    ) -> Image.Image:
+        """
+        Restores a large LR image by tiling it into patches, processing each,
+        and stitching them back together. Prevents OOM for high-res inputs.
+        """
+        lr_w, lr_h = lr_image.size
+        hr_w, hr_h = round(lr_w * scale), round(lr_h * scale)
+        
+        # Final HR canvas
+        full_hr = Image.new("RGB", (hr_w, hr_h))
+        
+        stride = patch_size - overlap
+        
+        # Progress tracking (optional)
+        num_tiles_x = math.ceil(lr_w / stride)
+        num_tiles_y = math.ceil(lr_h / stride)
+        print(f"[AIDN] Tiled restoration: {num_tiles_x}x{num_tiles_y} grid...")
+
+        for y in range(0, lr_h, stride):
+            for x in range(0, lr_w, stride):
+                # 1. Define patch bbox with safety boundaries
+                cur_w = min(patch_size, lr_w - x)
+                cur_h = min(patch_size, lr_h - y)
+                
+                # 2. Restore this patch
+                hr_patch = self.restore_patch(lr_image, (x, y, cur_w, cur_h), scale)
+                
+                # 3. Stitching logic
+                # To avoid edge artifacts, we only paste the "center" part of the patch
+                # unless we are at the very edges of the whole image.
+                p_left = overlap // 2 if x > 0 else 0
+                p_top = overlap // 2 if y > 0 else 0
+                p_right = hr_patch.size[0] - (overlap // 2) if (x + cur_w) < lr_w else hr_patch.size[0]
+                p_bottom = hr_patch.size[1] - (overlap // 2) if (y + cur_h) < lr_h else hr_patch.size[1]
+                
+                # Crop the unique center part
+                unique_patch = hr_patch.crop((p_left, p_top, p_right, p_bottom))
+                
+                # Paste at the correct HR location
+                full_hr.paste(unique_patch, (round((x + p_left) * scale), round((y + p_top) * scale)))
+        
+        return full_hr
