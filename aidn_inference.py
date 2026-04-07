@@ -6,6 +6,8 @@ import math
 from base.config import load_cfg_from_cfg_file
 from models import get_model
 import logging
+from saliency_utils import propose_roi, get_spectral_residual_saliency
+from watermark_utils import embed_lsb_watermark, extract_lsb_watermark
 
 class AIDNWrapper:
     """
@@ -76,41 +78,97 @@ class AIDNWrapper:
         lr_img = lr_img.crop((0, 0, lr_w, lr_h))
         return lr_img
 
+    def embed_watermark(self, lr_image: Image.Image, text: str) -> Image.Image:
+        """Embeds a digital watermark into the LR image."""
+        return embed_lsb_watermark(lr_image, text)
+
+    def verify_watermark(self, lr_image: Image.Image) -> str:
+        """Extracts a digital watermark from the LR image."""
+        return extract_lsb_watermark(lr_image)
+
     def restore_patch(
         self,
         lr_image: Image.Image,
         bbox_lr: tuple,
         scale: float
     ) -> Image.Image:
-        x, y, w, h = bbox_lr
+        """
+        Restores a single patch from the LR image.
+        Uses single-batch inference.
+        """
+        return self.restore_patches_batch(lr_image, [bbox_lr], scale)[0]
 
-        lr_w, lr_h = lr_image.size
-        x = max(0, min(x, lr_w - 1))
-        y = max(0, min(y, lr_h - 1))
-        w = min(w, lr_w - x)
-        h = min(h, lr_h - y)
+    def restore_patches_batch(
+        self,
+        lr_image: Image.Image,
+        bboxes_lr: list,
+        scale: float
+    ) -> list:
+        """
+        Restores multiple patches in a single batched inference call.
+        bboxes_lr: list of (x, y, w, h)
+        """
+        if not bboxes_lr:
+            return []
 
-        lr_patch = lr_image.crop((x, y, x + w, y + h))
+        patches = []
+        orig_sizes = []
+        
+        # 1. Prepare patches and find max dimensions
+        max_w, max_h = 0, 0
+        for bbox in bboxes_lr:
+            x, y, w, h = bbox
+            # Safety checks
+            lr_w_img, lr_h_img = lr_image.size
+            x = max(0, min(x, lr_w_img - 1))
+            y = max(0, min(y, lr_h_img - 1))
+            w = min(w, lr_w_img - x)
+            h = min(h, lr_h_img - y)
+            
+            patch = lr_image.crop((x, y, x + w, y + h))
+            patches.append(patch)
+            orig_sizes.append((w, h))
+            max_w = max(max_w, w)
+            max_h = max(max_h, h)
 
-        lr_patch_padded, patch_orig_size = self._pad_to_multiple(lr_patch, multiple=12)
+        # 2. Pad all patches to the same max dimensions (multiple of 12)
+        multiple = 12
+        target_w = math.ceil(max_w / multiple) * multiple
+        target_h = math.ceil(max_h / multiple) * multiple
+        
+        padded_tensors = []
+        for patch in patches:
+            # We don't use _pad_to_multiple here because we want ALL to be the SAME size
+            # Create a black background of target size
+            full_padded = Image.new(patch.mode, (target_w, target_h), 0)
+            full_padded.paste(patch, (0, 0))
+            padded_tensors.append(TF.to_tensor(full_padded))
 
-        patch_t = TF.to_tensor(lr_patch_padded).unsqueeze(0).to(self.device)
+        # 3. Stack into a single 4D tensor: [N, 3, H, W]
+        batch_t = torch.stack(padded_tensors).to(self.device)
         scale_t = torch.tensor([scale], dtype=torch.float32).to(self.device)
 
-        patch_w, patch_h = patch_orig_size
-        hr_w = round(patch_w * scale)
-        hr_h = round(patch_h * scale)
-
-        padded_hr_h = round(patch_t.shape[-2] * scale)
-        padded_hr_w = round(patch_t.shape[-1] * scale)
+        # 4. Batched Inference
+        hr_h_padded = round(target_h * scale)
+        hr_w_padded = round(target_w * scale)
+        
         with torch.no_grad():
-            hr_patch_t = self.restore_net(patch_t, scale_t, padded_hr_h, padded_hr_w)
+            # self.restore_net supports batch size N
+            hr_batch_t = self.restore_net(batch_t, scale_t, hr_h_padded, hr_w_padded)
 
-        hr_patch_t = hr_patch_t.clamp(0, 1)
-        hr_patch = TF.to_pil_image(hr_patch_t.squeeze(0).cpu())
-        hr_patch = hr_patch.crop((0, 0, hr_w, hr_h))
+        hr_batch_t = hr_batch_t.clamp(0, 1)
 
-        return hr_patch
+        # 5. Convert back to list of PIL images and crop to original HR sizes
+        results = []
+        for i, (orig_w, orig_h) in enumerate(orig_sizes):
+            hr_patch = TF.to_pil_image(hr_batch_t[i].cpu())
+            # Real HR size
+            hr_w = round(orig_w * scale)
+            hr_h = round(orig_h * scale)
+            hr_patch = hr_patch.crop((0, 0, hr_w, hr_h))
+            results.append(hr_patch)
+
+        return results
 
     def restore_full_image(
         self,
@@ -160,3 +218,10 @@ class AIDNWrapper:
                 full_hr.paste(unique_patch, (round((x + p_left) * scale), round((y + p_top) * scale)))
         
         return full_hr
+
+    def get_saliency_roi(self, image: Image.Image, box_size: int = 256):
+        """
+        Computes saliency map and proposes a bounding box ROI.
+        """
+        # Suggest a square ROI for consistency
+        return propose_roi(image, box_width=box_size, box_height=box_size)

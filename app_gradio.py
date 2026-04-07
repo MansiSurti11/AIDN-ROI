@@ -44,6 +44,22 @@ def restore_roi(scale, patch_w, patch_h, click_data: gr.SelectData):
             f"(from LR region x={x}, y={y}, w={patch_w}, h={patch_h})")
     return hr_patch, info
 
+def auto_restore_salient(scale, patch_w, patch_h):
+    global _embedded_lr
+    if _embedded_lr is None:
+        return None, "⚠️ Compress an image first."
+    
+    x, y, w, h = wrapper.get_saliency_roi(_embedded_lr, box_size=max(patch_w, patch_h))
+    
+    hr_patch = wrapper.restore_patch(
+        lr_image=_embedded_lr,
+        bbox_lr=(x, y, w, h),
+        scale=scale
+    )
+    
+    info = f"✨ Auto-detected most salient region at ({x}, {y}). Restored {hr_patch.size[0]}x{hr_patch.size[1]} px."
+    return hr_patch, info
+
 with gr.Blocks(title="AIDN ROI Restore", theme=gr.themes.Soft()) as demo:
     gr.Markdown("""
     # 🔍 AIDN — Selective ROI Restore
@@ -59,6 +75,7 @@ with gr.Blocks(title="AIDN ROI Restore", theme=gr.themes.Soft()) as demo:
                 label="Scale Factor"
             )
             compress_btn = gr.Button("Compress →", variant="primary")
+            auto_btn = gr.Button("✨ Auto Restore Salient ROI", variant="secondary")
 
         with gr.Column(scale=1):
             lr_output = gr.Image(
@@ -82,6 +99,12 @@ with gr.Blocks(title="AIDN ROI Restore", theme=gr.themes.Soft()) as demo:
 
     lr_output.select(
         fn=restore_roi,
+        inputs=[scale_slider, patch_w, patch_h],
+        outputs=[hr_patch_output, restore_info]
+    )
+
+    auto_btn.click(
+        fn=auto_restore_salient,
         inputs=[scale_slider, patch_w, patch_h],
         outputs=[hr_patch_output, restore_info]
     )
